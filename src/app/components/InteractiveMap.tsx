@@ -48,6 +48,10 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
   }>({ rainfall: 0, temp: 0, humidity: 0, wind: 0, windDir: "—", feels: 0 });
 
   const [forecast, setForecast] = useState<{ day: string; temp: number }[]>([]);
+  /** When set, live OpenWeather data is loaded for this map point. */
+  const [pinnedCoords, setPinnedCoords] = useState<{ lat: number; lng: number } | null>(null);
+  const [weatherLoading, setWeatherLoading] = useState(false);
+  const [weatherError, setWeatherError] = useState<string | null>(null);
   const [locations, setLocations] = useState<MapPoint[]>([]);
   const [infrastructure, setInfrastructure] = useState<MapPoint[]>([]);
   const [disasters, setDisasters] = useState<MapPoint[]>([]);
@@ -141,7 +145,7 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
         n += 1;
       }
       setHeat(pts);
-      if (n) {
+      if (!pinnedCoords && n) {
         const avgT = sumT / n;
         setWeather({
           rainfall: Math.round((sumR / n) * 10) / 10,
@@ -153,20 +157,68 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
         });
       }
 
-      const fc = await apiGet<{ days?: { day: string; temp: number }[] }>("/api/v1/weather/forecast");
-      if (fc.days?.length) setForecast(fc.days);
-      else {
-        setForecast(
-          ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d, i) => ({
-            day: d,
-            temp: 20 + i,
-          })),
-        );
+      if (!pinnedCoords) {
+        const fc = await apiGet<{ days?: { day: string; temp: number }[] }>("/api/v1/weather/forecast");
+        if (fc.days?.length) setForecast(fc.days);
+        else {
+          setForecast(
+            ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d, i) => ({
+              day: d,
+              temp: 20 + i,
+            })),
+          );
+        }
       }
     } catch {
       /* offline — keep defaults */
     }
-  }, []);
+  }, [pinnedCoords]);
+
+  useEffect(() => {
+    if (!pinnedCoords) {
+      setWeatherLoading(false);
+      setWeatherError(null);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      setWeatherLoading(true);
+      setWeatherError(null);
+      try {
+        const cur = await apiGet<{
+          rainfall_mm: number;
+          temp_c: number;
+          humidity: number;
+          wind_speed_kmh: number;
+          wind_dir: string;
+          feels_like_c: number;
+        }>(
+          `/api/v1/weather/current?lat=${pinnedCoords.lat}&lon=${pinnedCoords.lng}`,
+        );
+        if (cancelled) return;
+        console.log("[weather-ui] OpenWeather current @ pin", pinnedCoords, cur);
+        setWeather({
+          rainfall: Math.round(cur.rainfall_mm * 10) / 10,
+          temp: Math.round(cur.temp_c * 10) / 10,
+          humidity: cur.humidity,
+          wind: Math.round(cur.wind_speed_kmh * 10) / 10,
+          windDir: cur.wind_dir || "—",
+          feels: Math.round(cur.feels_like_c * 10) / 10,
+        });
+        const fc = await apiGet<{ days?: { day: string; temp: number }[] }>(
+          `/api/v1/weather/forecast?lat=${pinnedCoords.lat}&lon=${pinnedCoords.lng}`,
+        );
+        if (!cancelled && fc.days?.length) setForecast(fc.days);
+      } catch {
+        if (!cancelled) setWeatherError("Weather data unavailable for this location.");
+      } finally {
+        if (!cancelled) setWeatherLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [pinnedCoords]);
 
   useEffect(() => {
     void load();
@@ -203,6 +255,7 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
         weatherHeat={heat}
         locations={locations}
         fitSignal={fitSignal}
+        onLocationPointClick={(p) => setPinnedCoords({ lat: p.lat, lng: p.lng })}
       />
     ),
     [basemap, activeLayers, infrastructure, disasters, heat, locations, fitSignal],
@@ -330,26 +383,37 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
               className="bg-black/90 backdrop-blur-xl border-t border-white/20 p-6"
             >
               <h3 className="text-sm text-white/60 uppercase tracking-wider mb-4">Live Weather</h3>
+              {weatherError ? (
+                <p className="text-xs text-red-400 mb-3">{weatherError}</p>
+              ) : null}
 
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Rainfall</div>
-                  <div className="text-2xl text-[#1E5EFF]">{weather.rainfall}mm</div>
-                  <div className="text-xs text-white/50 mt-1">Recent average</div>
+                  <div className="text-2xl text-[#1E5EFF]">
+                    {weatherLoading ? "…" : `${weather.rainfall}mm`}
+                  </div>
+                  <div className="text-xs text-white/50 mt-1">
+                    {pinnedCoords ? "OpenWeather at pin" : "Recent average"}
+                  </div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Temperature</div>
-                  <div className="text-2xl text-[#FF7A00]">{weather.temp}°C</div>
-                  <div className="text-xs text-white/50 mt-1">Feels like {weather.feels}°C</div>
+                  <div className="text-2xl text-[#FF7A00]">
+                    {weatherLoading ? "…" : `${weather.temp}°C`}
+                  </div>
+                  <div className="text-xs text-white/50 mt-1">
+                    Feels like {weatherLoading ? "…" : `${weather.feels}°C`}
+                  </div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Humidity</div>
-                  <div className="text-2xl text-white">{weather.humidity}%</div>
+                  <div className="text-2xl text-white">{weatherLoading ? "…" : `${weather.humidity}%`}</div>
                   <div className="text-xs text-white/50 mt-1">Live</div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Wind</div>
-                  <div className="text-2xl text-[#22C55E]">{weather.wind}km/h</div>
+                  <div className="text-2xl text-[#22C55E]">{weatherLoading ? "…" : `${weather.wind}km/h`}</div>
                   <div className="text-xs text-white/50 mt-1">{weather.windDir} Direction</div>
                 </div>
               </div>

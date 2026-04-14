@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import 'express-async-errors';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -9,7 +10,7 @@ import helmet from 'helmet';
 import cron from 'node-cron';
 import { WebSocketServer } from 'ws';
 import { registerRoutes } from './routes.js';
-import { runMigrations } from './migrate.js';
+import { connectMongo, DatabaseUnavailableError, hasDatabase } from './db.js';
 import { seedIfEmpty } from './seed.js';
 import { syncOpenWeather } from './services/weatherService.js';
 import { setWss } from './realtime.js';
@@ -22,10 +23,12 @@ const uploadsDir = path.join(__dirname, '..', 'uploads');
 async function main() {
   await fs.mkdir(uploadsDir, { recursive: true });
 
-  if (!process.env.DATABASE_URL) {
-    console.warn('[ndma-api] DATABASE_URL not set — API will fail DB operations until configured.');
+  await connectMongo();
+  if (!hasDatabase) {
+    console.warn(
+      '[ndma-api] MONGODB_URI missing or connection failed — DB-backed routes return empty data or 503 until MongoDB is available.',
+    );
   } else {
-    await runMigrations();
     await seedIfEmpty();
   }
 
@@ -36,6 +39,27 @@ async function main() {
   app.use('/uploads', express.static(uploadsDir));
 
   registerRoutes(app);
+
+  app.use(
+    (
+      err: unknown,
+      _req: express.Request,
+      res: express.Response,
+      _next: express.NextFunction,
+    ) => {
+      if (err instanceof DatabaseUnavailableError) {
+        res.status(503).json({
+          error: 'database_unavailable',
+          message: err.message,
+        });
+        return;
+      }
+      console.error(err);
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'internal_error' });
+      }
+    },
+  );
 
   if ((await fs.stat(distDir).catch(() => null))?.isDirectory()) {
     app.use(express.static(distDir));

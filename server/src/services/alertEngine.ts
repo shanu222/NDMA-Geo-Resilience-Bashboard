@@ -1,4 +1,5 @@
-import { query } from '../db.js';
+import mongoose from 'mongoose';
+import { Location, WeatherData, Infrastructure, Alert, RiskSnapshot } from '../models.js';
 import { broadcast } from '../realtime.js';
 import { categorize, computeRiskScore, persistSnapshot } from './riskService.js';
 
@@ -6,23 +7,18 @@ const RAIN_WARNING = 35;
 const RAIN_CRITICAL = 55;
 
 export async function refreshRiskForLocations() {
-  const { rows: locs } = await query<{
-    id: string;
-    population: number;
-    terrain_risk: number;
-  }>(`SELECT id, population, terrain_risk FROM locations`);
+  const locs = await Location.find().lean();
 
   for (const loc of locs) {
-    const w = await query<{ rainfall_mm: string | null }>(
-      `SELECT rainfall_mm::text FROM weather_data WHERE location_id = $1::uuid ORDER BY ts DESC LIMIT 1`,
-      [loc.id],
-    );
-    const rainfall = w.rows[0]?.rainfall_mm != null ? Number(w.rows[0].rainfall_mm) : 30;
+    const w = await WeatherData.findOne({ location_id: loc._id })
+      .sort({ ts: -1 })
+      .lean();
+    const rainfall = w?.rainfall_mm != null ? Number(w.rainfall_mm) : 30;
 
-    const inf = await query<{ avg: string | null }>(
-      `SELECT AVG(condition_score)::text AS avg FROM infrastructure`,
-    );
-    const avgInfra = inf.rows[0]?.avg != null ? Number(inf.rows[0].avg) : 55;
+    const infAgg = await Infrastructure.aggregate<{ avg: number | null }>([
+      { $group: { _id: null, avg: { $avg: '$condition_score' } } },
+    ]);
+    const avgInfra = infAgg[0]?.avg != null ? Number(infAgg[0].avg) : 55;
 
     const popDensity = Math.min(100, Math.round(loc.population / 25_000));
 
@@ -36,7 +32,7 @@ export async function refreshRiskForLocations() {
       populationDensity: popDensity,
     });
 
-    await persistSnapshot(loc.id, score, {
+    await persistSnapshot(String(loc._id), score, {
       rainfall_mm: rainfall,
       terrain: terrainNorm,
       infrastructure: infraNorm,
@@ -47,46 +43,39 @@ export async function refreshRiskForLocations() {
 }
 
 export async function runAlertEngine() {
-  const { rows } = await query<{
-    id: string;
-    name: string;
-    rainfall_mm: string | null;
-  }>(
-    `SELECT l.id, l.name, w.rainfall_mm::text
-     FROM locations l
-     JOIN LATERAL (
-       SELECT rainfall_mm FROM weather_data WHERE location_id = l.id ORDER BY ts DESC LIMIT 1
-     ) w ON true`,
-  );
+  const locs = await Location.find().lean();
 
-  for (const r of rows) {
-    const rain = r.rainfall_mm != null ? Number(r.rainfall_mm) : 0;
-    const rs = await query<{ score: string }>(
-      `SELECT score::text FROM risk_snapshots WHERE location_id = $1::uuid ORDER BY computed_at DESC LIMIT 1`,
-      [r.id],
-    );
-    const risk = rs.rows[0]?.score != null ? Number(rs.rows[0].score) : 0;
+  for (const loc of locs) {
+    const w = await WeatherData.findOne({ location_id: loc._id })
+      .sort({ ts: -1 })
+      .lean();
+    const rain = w?.rainfall_mm != null ? Number(w.rainfall_mm) : 0;
+
+    const rs = await RiskSnapshot.findOne({ location_id: loc._id })
+      .sort({ computed_at: -1 })
+      .lean();
+    const risk = rs?.score != null ? Number(rs.score) : 0;
 
     if (rain >= RAIN_CRITICAL || risk >= 85) {
       await insertIfNew(
         'flood',
         'critical',
-        `Critical flood risk in ${r.name}. Deploy emergency teams and inspect infrastructure.`,
-        r.id,
+        `Critical flood risk in ${loc.name}. Deploy emergency teams and inspect infrastructure.`,
+        String(loc._id),
       );
     } else if (rain >= RAIN_WARNING || risk >= 65) {
       await insertIfNew(
         'rainfall',
         'warning',
-        `Heavy rainfall / elevated risk in ${r.name}. Increase monitoring.`,
-        r.id,
+        `Heavy rainfall / elevated risk in ${loc.name}. Increase monitoring.`,
+        String(loc._id),
       );
     } else if (risk >= 45 && Math.random() < 0.15) {
       await insertIfNew(
         'monitoring',
         'info',
-        `Routine monitoring: conditions stable in ${r.name}.`,
-        r.id,
+        `Routine monitoring: conditions stable in ${loc.name}.`,
+        String(loc._id),
       );
     }
   }
@@ -99,15 +88,19 @@ async function insertIfNew(
   message: string,
   locationId: string,
 ) {
-  const dup = await query(
-    `SELECT id FROM alerts WHERE location_id = $1::uuid AND message = $2 AND created_at > NOW() - INTERVAL '2 hours'`,
-    [locationId, message],
-  );
-  if (dup.rowCount) return;
-  await query(
-    `INSERT INTO alerts (type, severity, message, location_id) VALUES ($1, $2, $3, $4::uuid)`,
-    [type, severity, message, locationId],
-  );
+  const since = new Date(Date.now() - 2 * 60 * 60 * 1000);
+  const dup = await Alert.findOne({
+    location_id: new mongoose.Types.ObjectId(locationId),
+    message,
+    created_at: { $gte: since },
+  }).lean();
+  if (dup) return;
+  await Alert.create({
+    type,
+    severity,
+    message,
+    location_id: new mongoose.Types.ObjectId(locationId),
+  });
 }
 
 export { categorize };

@@ -1,12 +1,29 @@
+import mongoose from 'mongoose';
 import pdfkit from 'pdfkit';
-import { query } from '../db.js';
+import { hasDatabase } from '../db.js';
+import { Alert } from '../models.js';
 import { nationalRiskIndex } from './riskService.js';
 
 export async function buildRiskPdf(): Promise<Buffer> {
-  const national = await nationalRiskIndex();
-  const { rows: alerts } = await query(
-    `SELECT type, severity, message, created_at FROM alerts ORDER BY created_at DESC LIMIT 20`,
-  );
+  let national = 55;
+  const alerts: { type: string; severity: string; message: string; created_at: Date }[] = [];
+
+  if (hasDatabase && mongoose.connection.readyState === 1) {
+    try {
+      national = await nationalRiskIndex();
+      const rows = await Alert.find().sort({ created_at: -1 }).limit(20).lean();
+      for (const a of rows) {
+        alerts.push({
+          type: a.type,
+          severity: a.severity,
+          message: a.message,
+          created_at: a.created_at,
+        });
+      }
+    } catch (e) {
+      console.error('[pdf]', e);
+    }
+  }
 
   const doc = new pdfkit({ size: 'A4', margin: 50 });
   const chunks: Buffer[] = [];
@@ -19,10 +36,16 @@ export async function buildRiskPdf(): Promise<Buffer> {
   doc.moveDown();
   doc.fontSize(11).text(`Generated: ${new Date().toISOString()}`);
   doc.text(`National risk index (composite): ${national}`);
+  if (!hasDatabase || mongoose.connection.readyState !== 1) {
+    doc.fontSize(10).text('Note: Database not connected — values are placeholders.', { width: 500 });
+  }
   doc.moveDown();
   doc.fontSize(13).text('Recent alerts');
   doc.fontSize(10);
-  for (const a of alerts as { type: string; severity: string; message: string; created_at: Date }[]) {
+  if (alerts.length === 0) {
+    doc.text('(No alerts in database.)', { width: 500 });
+  }
+  for (const a of alerts) {
     doc.text(`• [${a.severity}] ${a.type}: ${a.message}`, { width: 500 });
   }
   doc.moveDown();

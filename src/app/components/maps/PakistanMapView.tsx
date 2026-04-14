@@ -112,6 +112,7 @@ export default function PakistanMapView({
   weatherHeat,
   locations,
   fitSignal,
+  onLocationPointClick,
 }: {
   basemap: Basemap;
   activeLayers: string[];
@@ -120,6 +121,8 @@ export default function PakistanMapView({
   weatherHeat: { lat: number; lng: number; v: number }[];
   locations: MapPoint[];
   fitSignal: number;
+  /** Fires when a population/location marker is clicked (for live weather at that point). */
+  onLocationPointClick?: (point: MapPoint) => void;
 }) {
   const center: [number, number] = [30.3753, 69.3451];
   const showWeather = activeLayers.includes('weather');
@@ -151,6 +154,9 @@ export default function PakistanMapView({
               center={[p.lat, p.lng]}
               radius={Math.min(28, 8 + (p.meta ? Number(p.meta) / 200000 : 6))}
               pathOptions={{ color: '#8B5CF6', fillColor: '#8B5CF6', fillOpacity: 0.2 }}
+              eventHandlers={{
+                click: () => onLocationPointClick?.(p),
+              }}
             >
               <Popup>{p.label}</Popup>
             </CircleMarker>

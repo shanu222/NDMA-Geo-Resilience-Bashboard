@@ -1,4 +1,6 @@
-import { query } from '../db.js';
+import mongoose from 'mongoose';
+import { hasDatabase } from '../db.js';
+import { RiskSnapshot } from '../models.js';
 
 export type RiskCategory = 'low' | 'medium' | 'high';
 
@@ -35,20 +37,22 @@ export async function persistSnapshot(
   inputs: Record<string, unknown>,
 ) {
   const cat = categorize(score);
-  await query(
-    `INSERT INTO risk_snapshots (location_id, score, category, inputs)
-     VALUES ($1::uuid, $2, $3, $4::jsonb)`,
-    [locationId, score, cat, JSON.stringify(inputs)],
-  );
+  await RiskSnapshot.create({
+    location_id: new mongoose.Types.ObjectId(locationId),
+    score,
+    category: cat,
+    inputs,
+    computed_at: new Date(),
+  });
 }
 
 export async function nationalRiskIndex(): Promise<number> {
-  const { rows } = await query<{ m: string | null }>(
-    `SELECT AVG(score)::text AS m FROM (
-       SELECT DISTINCT ON (location_id) score FROM risk_snapshots
-       ORDER BY location_id, computed_at DESC
-     ) t`,
-  );
-  if (rows[0]?.m != null) return Math.round(Number(rows[0].m));
+  if (!hasDatabase || mongoose.connection.readyState !== 1) return 55;
+  const agg = await RiskSnapshot.aggregate<{ avg: number }>([
+    { $sort: { computed_at: -1 } },
+    { $group: { _id: '$location_id', score: { $first: '$score' } } },
+    { $group: { _id: null, avg: { $avg: '$score' } } },
+  ]);
+  if (agg[0]?.avg != null) return Math.round(agg[0].avg);
   return 55;
 }
