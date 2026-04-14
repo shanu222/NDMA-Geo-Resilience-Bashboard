@@ -43,3 +43,7 @@ coverage/
 # Misc
 *.pem
 .cache/
+
+# Server build & uploads
+server/dist/
+server/uploads/

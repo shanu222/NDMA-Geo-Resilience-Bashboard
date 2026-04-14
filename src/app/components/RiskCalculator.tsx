@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { motion } from "motion/react";
 import { ArrowLeft, Calculator, Droplets, Mountain, Building2, TrendingUp } from "lucide-react";
+import { apiPost } from "@/lib/api";
 
 interface RiskCalculatorProps {
   onBack: () => void;
@@ -11,13 +12,11 @@ export default function RiskCalculator({ onBack }: RiskCalculatorProps) {
   const [terrain, setTerrain] = useState(50);
   const [infrastructure, setInfrastructure] = useState(50);
   const [showResult, setShowResult] = useState(false);
+  const [riskScore, setRiskScore] = useState(0);
 
-  const calculateRisk = () => {
-    // Simple weighted calculation
+  const calculateRiskLocal = () => {
     return Math.round((rainfall * 0.4 + terrain * 0.3 + infrastructure * 0.3));
   };
-
-  const riskScore = calculateRisk();
   const getRiskLevel = (score: number) => {
     if (score >= 80) return { label: 'CRITICAL', color: '#EF4444' };
     if (score >= 60) return { label: 'HIGH', color: '#FF7A00' };
@@ -27,7 +26,18 @@ export default function RiskCalculator({ onBack }: RiskCalculatorProps) {
 
   const riskLevel = getRiskLevel(riskScore);
 
-  const handleCalculate = () => {
+  const handleCalculate = async () => {
+    try {
+      const r = await apiPost<{ score: number; category: string }>("/api/v1/risk/calculate", {
+        rainfall,
+        terrain,
+        infrastructure,
+        populationDensity: 55,
+      });
+      setRiskScore(r.score);
+    } catch {
+      setRiskScore(calculateRiskLocal());
+    }
     setShowResult(true);
   };
 

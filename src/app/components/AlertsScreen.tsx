@@ -1,5 +1,8 @@
+import { useEffect, useMemo, useState } from "react";
 import { motion } from "motion/react";
 import { ArrowLeft, AlertTriangle, AlertCircle, Info, Filter, MapPin, Clock } from "lucide-react";
+import { apiGet, type AlertApiRow } from "@/lib/api";
+import { useRealtimePoll } from "@/lib/useRealtime";
 
 interface AlertsScreenProps {
   onBack: () => void;
@@ -15,56 +18,46 @@ interface Alert {
 }
 
 export default function AlertsScreen({ onBack }: AlertsScreenProps) {
-  const alerts: Alert[] = [
-    {
-      id: '1',
-      severity: 'critical',
-      title: 'Flash Flood Warning',
-      location: 'Karachi District',
-      time: '15 mins ago',
-      description: 'Heavy rainfall detected. Immediate evacuation recommended for low-lying areas.'
-    },
-    {
-      id: '2',
-      severity: 'critical',
-      title: 'Infrastructure Failure Risk',
-      location: 'Lahore Bridge-7',
-      time: '32 mins ago',
-      description: 'Structural integrity compromised. Deploy inspection team immediately.'
-    },
-    {
-      id: '3',
-      severity: 'warning',
-      title: 'Rainfall Alert',
-      location: 'Islamabad Region',
-      time: '1 hour ago',
-      description: 'Moderate to heavy rainfall expected in next 24-48 hours.'
-    },
-    {
-      id: '4',
-      severity: 'warning',
-      title: 'High Water Levels',
-      location: 'Indus River Basin',
-      time: '2 hours ago',
-      description: 'River water levels approaching warning threshold.'
-    },
-    {
-      id: '5',
-      severity: 'info',
-      title: 'System Update',
-      location: 'National',
-      time: '3 hours ago',
-      description: 'New satellite imagery available for all monitored zones.'
-    },
-    {
-      id: '6',
-      severity: 'warning',
-      title: 'Landslide Risk',
-      location: 'Murree Hills',
-      time: '4 hours ago',
-      description: 'Unstable terrain detected. Monitor continuously.'
+  const [alerts, setAlerts] = useState<Alert[]>([]);
+
+  const load = async () => {
+    try {
+      const rows = await apiGet<AlertApiRow[]>("/api/v1/alerts");
+      setAlerts(
+        rows.map((r) => ({
+          id: r.id,
+          severity: r.severity,
+          title: r.type,
+          location: r.location_name || "National",
+          time: new Date(r.created_at).toLocaleString(),
+          description: r.message,
+        })),
+      );
+    } catch {
+      setAlerts([
+        {
+          id: "1",
+          severity: "critical",
+          title: "Flash Flood Warning",
+          location: "Karachi District",
+          time: "—",
+          description: "Connect API for live alerts.",
+        },
+      ]);
     }
-  ];
+  };
+
+  useEffect(() => {
+    void load();
+  }, []);
+
+  useRealtimePoll(load, 45_000);
+
+  const counts = useMemo(() => {
+    const c = { critical: 0, warning: 0, info: 0 };
+    for (const a of alerts) c[a.severity] += 1;
+    return c;
+  }, [alerts]);
 
   const getSeverityConfig = (severity: Alert['severity']) => {
     switch (severity) {
@@ -124,15 +117,15 @@ export default function AlertsScreen({ onBack }: AlertsScreenProps) {
           {/* Quick Stats */}
           <div className="grid grid-cols-3 gap-3">
             <div className="bg-[#EF4444]/10 backdrop-blur-sm border border-[#EF4444]/30 rounded-xl p-3 text-center">
-              <div className="text-lg text-[#EF4444]">2</div>
+              <div className="text-lg text-[#EF4444]">{counts.critical}</div>
               <div className="text-[10px] text-white/60 uppercase tracking-wider">Critical</div>
             </div>
             <div className="bg-[#FF7A00]/10 backdrop-blur-sm border border-[#FF7A00]/30 rounded-xl p-3 text-center">
-              <div className="text-lg text-[#FF7A00]">3</div>
+              <div className="text-lg text-[#FF7A00]">{counts.warning}</div>
               <div className="text-[10px] text-white/60 uppercase tracking-wider">Warnings</div>
             </div>
             <div className="bg-[#1E5EFF]/10 backdrop-blur-sm border border-[#1E5EFF]/30 rounded-xl p-3 text-center">
-              <div className="text-lg text-[#1E5EFF]">1</div>
+              <div className="text-lg text-[#1E5EFF]">{counts.info}</div>
               <div className="text-[10px] text-white/60 uppercase tracking-wider">Info</div>
             </div>
           </div>

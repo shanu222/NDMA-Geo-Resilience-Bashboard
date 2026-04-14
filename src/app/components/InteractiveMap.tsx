@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { motion, AnimatePresence } from "motion/react";
 import {
   Search,
@@ -12,15 +12,167 @@ import {
   ArrowLeft,
   Circle
 } from "lucide-react";
+import PakistanMapView, { type MapPoint } from "./maps/PakistanMapView";
+import { apiGet } from "@/lib/api";
+import { useRealtimePoll } from "@/lib/useRealtime";
 
 interface InteractiveMapProps {
   onBack: () => void;
+}
+
+type Basemap = "osm" | "satellite" | "terrain";
+
+function parsePoint(g: unknown): { lat: number; lng: number } | null {
+  if (!g || typeof g !== "object") return null;
+  const gj = g as { type?: string; coordinates?: [number, number] };
+  if (gj.type === "Point" && gj.coordinates?.length === 2) {
+    return { lat: gj.coordinates[1], lng: gj.coordinates[0] };
+  }
+  return null;
 }
 
 export default function InteractiveMap({ onBack }: InteractiveMapProps) {
   const [showLayers, setShowLayers] = useState(false);
   const [activeLayers, setActiveLayers] = useState<string[]>(['weather']);
   const [showWeatherPanel, setShowWeatherPanel] = useState(false);
+  const [basemap, setBasemap] = useState<Basemap>("osm");
+  const [fitSignal, setFitSignal] = useState(0);
+
+  const [weather, setWeather] = useState<{
+    rainfall: number;
+    temp: number;
+    humidity: number;
+    wind: number;
+    windDir: string;
+    feels: number;
+  }>({ rainfall: 0, temp: 0, humidity: 0, wind: 0, windDir: "—", feels: 0 });
+
+  const [forecast, setForecast] = useState<{ day: string; temp: number }[]>([]);
+  const [locations, setLocations] = useState<MapPoint[]>([]);
+  const [infrastructure, setInfrastructure] = useState<MapPoint[]>([]);
+  const [disasters, setDisasters] = useState<MapPoint[]>([]);
+  const [heat, setHeat] = useState<{ lat: number; lng: number; v: number }[]>([]);
+
+  const load = useCallback(async () => {
+    try {
+      const locs = await apiGet<
+        { id: string; name: string; centroid_geojson: unknown; population: number }[]
+      >("/api/v1/locations");
+      setLocations(
+        locs
+          .map((l) => {
+            const p = parsePoint(l.centroid_geojson);
+            if (!p) return null;
+            return {
+              id: l.id,
+              lat: p.lat,
+              lng: p.lng,
+              label: l.name,
+              meta: String(l.population),
+            } as MapPoint;
+          })
+          .filter(Boolean) as MapPoint[],
+      );
+
+      const inf = await apiGet<
+        { id: string; type: string; label: string | null; geojson: unknown }[]
+      >("/api/v1/infrastructure");
+      setInfrastructure(
+        inf
+          .map((x) => {
+            const p = parsePoint(x.geojson);
+            if (!p) return null;
+            return {
+              id: x.id,
+              lat: p.lat,
+              lng: p.lng,
+              label: x.label || x.type,
+              meta: x.type,
+            } as MapPoint;
+          })
+          .filter(Boolean) as MapPoint[],
+      );
+
+      const dh = await apiGet<{ id: string; type: string; geojson: unknown; description: string | null }[]>(
+        "/api/v1/disasters",
+      );
+      setDisasters(
+        dh
+          .map((d) => {
+            const p = parsePoint(d.geojson);
+            if (!p) return null;
+            return {
+              id: d.id,
+              lat: p.lat,
+              lng: p.lng,
+              label: `${d.type}`,
+              meta: d.description || "",
+            } as MapPoint;
+          })
+          .filter(Boolean) as MapPoint[],
+      );
+
+      const wx = await apiGet<
+        {
+          rainfall_mm: string | null;
+          temp_c: string | null;
+          humidity: string | null;
+          wind_speed: string | null;
+          wind_deg: string | null;
+          location_id: string | null;
+        }[]
+      >("/api/v1/weather/latest");
+
+      const pts: { lat: number; lng: number; v: number }[] = [];
+      let sumR = 0;
+      let sumT = 0;
+      let sumH = 0;
+      let sumW = 0;
+      let n = 0;
+      for (const row of wx.slice(0, 20)) {
+        const r = row.rainfall_mm != null ? Number(row.rainfall_mm) : 0;
+        const lc = locs.find((l) => l.id === row.location_id);
+        const p = parsePoint(lc?.centroid_geojson);
+        if (p) pts.push({ lat: p.lat, lng: p.lng, v: r });
+        sumR += r;
+        sumT += row.temp_c != null ? Number(row.temp_c) : 0;
+        sumH += row.humidity != null ? Number(row.humidity) : 0;
+        sumW += row.wind_speed != null ? Number(row.wind_speed) : 0;
+        n += 1;
+      }
+      setHeat(pts);
+      if (n) {
+        const avgT = sumT / n;
+        setWeather({
+          rainfall: Math.round((sumR / n) * 10) / 10,
+          temp: Math.round(avgT * 10) / 10,
+          humidity: Math.round(sumH / n),
+          wind: Math.round((sumW / n) * 10) / 10,
+          windDir: "NE",
+          feels: Math.round((avgT + 2) * 10) / 10,
+        });
+      }
+
+      const fc = await apiGet<{ days?: { day: string; temp: number }[] }>("/api/v1/weather/forecast");
+      if (fc.days?.length) setForecast(fc.days);
+      else {
+        setForecast(
+          ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((d, i) => ({
+            day: d,
+            temp: 20 + i,
+          })),
+        );
+      }
+    } catch {
+      /* offline — keep defaults */
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  useRealtimePoll(load, 60_000);
 
   const layers = [
     { id: 'weather', label: 'Weather', icon: CloudRain, color: '#1E5EFF' },
@@ -37,69 +189,29 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
     );
   };
 
+  const cycleBasemap = () => {
+    setBasemap((b) => (b === "osm" ? "satellite" : b === "satellite" ? "terrain" : "osm"));
+  };
+
+  const mapMemo = useMemo(
+    () => (
+      <PakistanMapView
+        basemap={basemap}
+        activeLayers={activeLayers}
+        infrastructure={infrastructure}
+        disasters={disasters}
+        weatherHeat={heat}
+        locations={locations}
+        fitSignal={fitSignal}
+      />
+    ),
+    [basemap, activeLayers, infrastructure, disasters, heat, locations, fitSignal],
+  );
+
   return (
     <div className="min-h-screen bg-[#0B1F3A] relative overflow-hidden">
-      {/* Map Background - Simulated */}
       <div className="absolute inset-0">
-        <div className="w-full h-full bg-gradient-to-br from-[#0a1f35] via-[#0f2d4a] to-[#1a3a52]">
-          {/* Grid overlay */}
-          <div className="absolute inset-0 opacity-20"
-            style={{
-              backgroundImage: `
-                linear-gradient(rgba(30, 94, 255, 0.3) 1px, transparent 1px),
-                linear-gradient(90deg, rgba(30, 94, 255, 0.3) 1px, transparent 1px)
-              `,
-              backgroundSize: '50px 50px'
-            }}
-          ></div>
-
-          {/* Simulated map markers and zones */}
-          <div className="absolute inset-0">
-            {/* High risk zone */}
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 0.4 }}
-              transition={{ duration: 1, repeat: Infinity, repeatType: "reverse" }}
-              className="absolute top-1/4 left-1/3 w-32 h-32 bg-[#EF4444] rounded-full blur-3xl"
-            ></motion.div>
-
-            {/* Medium risk zone */}
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 0.3 }}
-              transition={{ duration: 1.5, repeat: Infinity, repeatType: "reverse", delay: 0.5 }}
-              className="absolute top-1/2 right-1/4 w-40 h-40 bg-[#FF7A00] rounded-full blur-3xl"
-            ></motion.div>
-
-            {/* Safe zone */}
-            <motion.div
-              initial={{ scale: 0.8, opacity: 0 }}
-              animate={{ scale: 1, opacity: 0.2 }}
-              transition={{ duration: 2, repeat: Infinity, repeatType: "reverse", delay: 1 }}
-              className="absolute bottom-1/4 left-1/2 w-36 h-36 bg-[#22C55E] rounded-full blur-3xl"
-            ></motion.div>
-
-            {/* Location markers */}
-            {[...Array(8)].map((_, i) => (
-              <motion.div
-                key={i}
-                initial={{ scale: 0 }}
-                animate={{ scale: 1 }}
-                transition={{ delay: i * 0.1, type: "spring" }}
-                className="absolute"
-                style={{
-                  top: `${Math.random() * 80 + 10}%`,
-                  left: `${Math.random() * 80 + 10}%`
-                }}
-              >
-                <div className="relative">
-                  <div className="w-3 h-3 bg-[#1E5EFF] rounded-full animate-ping absolute"></div>
-                  <div className="w-3 h-3 bg-[#1E5EFF] rounded-full border-2 border-white"></div>
-                </div>
-              </motion.div>
-            ))}
-          </div>
-        </div>
+        <div className="absolute inset-0 z-0">{mapMemo}</div>
       </div>
 
       {/* Top Bar */}
@@ -180,10 +292,18 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
 
       {/* Floating Controls */}
       <div className="absolute right-4 top-1/2 -translate-y-1/2 z-20 space-y-3">
-        <button className="w-12 h-12 rounded-xl bg-black/40 backdrop-blur-md border border-white/20 flex items-center justify-center hover:bg-black/60 transition-all">
+        <button
+          type="button"
+          onClick={cycleBasemap}
+          className="w-12 h-12 rounded-xl bg-black/40 backdrop-blur-md border border-white/20 flex items-center justify-center hover:bg-black/60 transition-all"
+        >
           <Navigation className="w-5 h-5 text-white" />
         </button>
-        <button className="w-12 h-12 rounded-xl bg-black/40 backdrop-blur-md border border-white/20 flex items-center justify-center hover:bg-black/60 transition-all">
+        <button
+          type="button"
+          onClick={() => setFitSignal((s) => s + 1)}
+          className="w-12 h-12 rounded-xl bg-black/40 backdrop-blur-md border border-white/20 flex items-center justify-center hover:bg-black/60 transition-all"
+        >
           <Maximize2 className="w-5 h-5 text-white" />
         </button>
       </div>
@@ -214,36 +334,36 @@ export default function InteractiveMap({ onBack }: InteractiveMapProps) {
               <div className="grid grid-cols-2 gap-4 mb-4">
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Rainfall</div>
-                  <div className="text-2xl text-[#1E5EFF]">45mm</div>
-                  <div className="text-xs text-white/50 mt-1">Last 6 hours</div>
+                  <div className="text-2xl text-[#1E5EFF]">{weather.rainfall}mm</div>
+                  <div className="text-xs text-white/50 mt-1">Recent average</div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Temperature</div>
-                  <div className="text-2xl text-[#FF7A00]">28°C</div>
-                  <div className="text-xs text-white/50 mt-1">Feels like 31°C</div>
+                  <div className="text-2xl text-[#FF7A00]">{weather.temp}°C</div>
+                  <div className="text-xs text-white/50 mt-1">Feels like {weather.feels}°C</div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Humidity</div>
-                  <div className="text-2xl text-white">78%</div>
-                  <div className="text-xs text-white/50 mt-1">High</div>
+                  <div className="text-2xl text-white">{weather.humidity}%</div>
+                  <div className="text-xs text-white/50 mt-1">Live</div>
                 </div>
                 <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                   <div className="text-xs text-white/60 mb-1 uppercase tracking-wider">Wind</div>
-                  <div className="text-2xl text-[#22C55E]">12km/h</div>
-                  <div className="text-xs text-white/50 mt-1">NE Direction</div>
+                  <div className="text-2xl text-[#22C55E]">{weather.wind}km/h</div>
+                  <div className="text-xs text-white/50 mt-1">{weather.windDir} Direction</div>
                 </div>
               </div>
 
               <div className="bg-white/5 rounded-xl p-4 border border-white/10">
                 <div className="text-xs text-white/60 mb-3 uppercase tracking-wider">7-Day Forecast</div>
                 <div className="flex gap-3 overflow-x-auto pb-2">
-                  {['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'].map((day, i) => (
-                    <div key={day} className="flex-shrink-0 text-center">
-                      <div className="text-xs text-white/60 mb-2">{day}</div>
+                  {forecast.map((day) => (
+                    <div key={day.day} className="flex-shrink-0 text-center">
+                      <div className="text-xs text-white/60 mb-2">{day.day}</div>
                       <div className="w-10 h-10 rounded-lg bg-[#1E5EFF]/20 flex items-center justify-center mb-2">
                         <CloudRain className="w-5 h-5 text-[#1E5EFF]" />
                       </div>
-                      <div className="text-xs text-white">{20 + i}°</div>
+                      <div className="text-xs text-white">{day.temp}°</div>
                     </div>
                   ))}
                 </div>
